@@ -8,6 +8,11 @@
 #include "traps.h"
 #include "spinlock.h"
 #include "i8254.h"
+//외부선언 추가
+extern struct {
+  struct spinlock lock;
+  struct proc proc[NPROC];
+} ptable;
 
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
@@ -55,6 +60,55 @@ trap(struct trapframe *tf)
       wakeup(&ticks);
       release(&tickslock);
     }
+    // 현재 실행 중인 프로세스의 tick 증가
+    struct proc *curproc = myproc();
+    if (curproc && curproc->state == RUNNING) {
+      int q = curproc->priority;
+      curproc->ticks[q]++;
+    }
+    
+    acquire(&ptable.lock);
+    //// RUNNABLE 상태인 다른 프로세스들의 wait_ticks 증가
+    for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+      if (p->state == RUNNABLE && p != curproc) {
+        int q = p->priority;
+        if ( q >=0 && q< MLFQ_LEVELS){
+          p->wait_ticks[q]++;
+        }
+        
+      }
+    }
+    //priority boost 조건 확인 (policy == 1일 때만)
+    if (mycpu()->sched_policy == 1) {
+      for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if (p -> state != RUNNABLE) continue;
+        int q = p->priority;
+        //Q0 -> Q1
+        if (q == 0 && p->wait_ticks[0] >= 500) {
+          p->priority = 1;
+          p->wait_ticks[0] = 0;
+          enqueue(&mlfq[1], p);
+        }
+  
+        // Q1 -> Q2
+        if (q == 1 && p->wait_ticks[1] >= 160){
+          p->priority = 2;  
+          p->wait_ticks[1] = 0;
+          enqueue(&mlfq[2], p);
+        }
+        //Q2 ->Q3
+        else if (q == 2 && p->wait_ticks[2] >= 80){
+          p->priority = 3;
+          p->wait_ticks[2] = 0;
+          enqueue(&mlfq[3], p);
+        }
+        
+      }
+    }
+    release(&ptable.lock);
+
+ 
+  
     lapiceoi();
     break;
   case T_IRQ0 + IRQ_IDE:

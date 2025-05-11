@@ -7,11 +7,14 @@
 #include "proc.h"
 #include "spinlock.h"
 #include "debug.h"
+#include "pstat.h"
 
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
 } ptable;
+
+struct queue mlfq[MLFQ_LEVELS];  // MLFQ 큐 4개 (Q3~Q0)
 
 static struct proc *initproc;
 
@@ -25,6 +28,11 @@ void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
+
+  //MLFQ 큐 4개 초기화
+  for (int i = 0; i < MLFQ_LEVELS; i++) {
+    initqueue(&mlfq[i]);
+  }
 }
 
 // Must be called with interrupts disabled
@@ -93,8 +101,15 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
 
-  release(&ptable.lock);
+  //추가
+  p->priority = 3;  // Q3에서 시작
 
+  for (int i = 0; i < MLFQ_LEVELS; i++) {
+    p->ticks[i] = 0;
+    p->wait_ticks[i] = 0;
+  }
+  
+  release(&ptable.lock);
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
@@ -155,7 +170,7 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
-
+  enqueue(&mlfq[3], p);  // 
   release(&ptable.lock);
 }
 
@@ -195,6 +210,11 @@ fork(void)
     return -1;
   }
 
+  for (int i = 0; i < MLFQ_LEVELS; i++) {
+    np->ticks[i] = 0;
+    np->wait_ticks[i] = 0;
+  }
+
   // Copy process state from proc.
   if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
     kfree(np->kstack);
@@ -221,6 +241,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
+  np->priority = 3;                // 기본 priority 지정
+  enqueue(&mlfq[3], np);
 
   release(&ptable.lock);
 
@@ -331,35 +353,66 @@ scheduler(void)
   struct proc *p;
   struct cpu *c = mycpu();
   c->proc = 0;
-  
-  for(;;){
-    // Enable interrupts on this processor.
+
+  for (;;) {
     sti();
-
-    // Loop over process table looking for process to run.
     acquire(&ptable.lock);
-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
-      if(p->state != RUNNABLE)
-        continue;
 
-      // Switch to chosen process.  It is the process's job
-      // to release ptable.lock and then reacquire it
-      // before jumping back to us.
-      c->proc = p;
-      switchuvm(p);
-      p->state = RUNNING;
+    int found = 0;
 
-      swtch(&(c->scheduler), p->context);
-      switchkvm();
+    // MLFQ 정책인 경우
+    if (mycpu()->sched_policy == 1) {
+      for(int level =3; level >= 0; level--)  {
+        while (!isempty(&mlfq[level])) {
+          p = dequeue(&mlfq[level]);
+          if ( !p || p->state != RUNNABLE)
+          continue;
 
-      // Process is done running for now.
-      // It should have changed its p->state before coming back.
-      c->proc = 0;
+          found = 1;
+
+          c->proc = p;
+          switchuvm(p);
+          p->state = RUNNING;
+
+          swtch(&c->scheduler, p->context);
+          switchkvm();
+
+          c->proc = 0;
+
+          // time slice 기반으로 demotion 판단
+          int time_slice[4] = {0,32,16,8};  // Q0는 FIFO
+          if (level > 0 && p->ticks[level] >= time_slice[level]) {
+            p->ticks[level] = 0;        // 현재 큐 실행 시간 초기화
+            p->priority = level - 1;    // 우선순위 강등
+            enqueue(&mlfq[p->priority], p);  // 아래 큐에 넣기
+          } else {
+            enqueue(&mlfq[level], p);   // 다시 현재 큐로
+          }
+          break;
+        }
+        if (found) break;
+      }
+    }
+    if (!found && mycpu()->sched_policy != 1) {
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if (p->state != RUNNABLE)
+          continue;
+        found = 1;
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+
+        swtch(&c->scheduler, p->context);
+        switchkvm();
+
+        c->proc = 0;
+      }
     }
     release(&ptable.lock);
-
   }
 }
+
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
@@ -392,10 +445,17 @@ void
 yield(void)
 {
   acquire(&ptable.lock);  //DOC: yieldlock
-  myproc()->state = RUNNABLE;
+  struct proc *curproc = myproc();
+
+  // MLFQ 정책일 경우 RUNNABLE 상태일 때 큐에 다시 넣기
+  if (mycpu()->sched_policy == 1) {
+    enqueue(&mlfq[curproc->priority], curproc);
+  }
+  curproc->state = RUNNABLE;
   sched();
   release(&ptable.lock);
 }
+
 
 // A fork child's very first scheduling by scheduler()
 // will swtch here.  "Return" to user space.
@@ -501,6 +561,37 @@ kill(int pid)
   release(&ptable.lock);
   return -1;
 }
+//큐 초기화
+void initqueue(struct queue *q) {
+  q->front = 0;
+  q->rear = 0;
+}
+
+// 큐가 비었는지 확인
+int isempty(struct queue *q) {
+  return q->front == q->rear;
+}
+
+// 큐에 중복없이 프로세스 추가
+void enqueue(struct queue *q, struct proc *p) {
+  //이미 들어있는지 검사
+  for (int i = q->front; i < q->rear; i++) {
+    if (q->q[i % QUEUE_SIZE] == p)
+      return; //중복 방지
+  }
+  q->q[q->rear % QUEUE_SIZE] = p;
+  q->rear++;
+}
+
+// 큐에서 프로세스 꺼내기
+struct proc* dequeue(struct queue *q) {
+  if (isempty(q))
+    return 0;
+  struct proc *p = q->q[q->front % QUEUE_SIZE];
+  q->front++;
+  return p;
+}
+
 
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
@@ -538,3 +629,42 @@ procdump(void)
     cprintf("\n");
   }
 }
+//추가
+int
+setSchedPolicy(int policy)
+{
+  if (policy < 0 || policy > 3)  // 정책 번호 범위 확인
+    return -1;
+  
+  pushcli(); //인터럽트 끄기
+  mycpu()->sched_policy = policy;
+  popcli(); //인터럽트 켜기
+  return 0;
+}
+
+
+int
+getpinfo(struct pstat *ps)
+{
+  struct proc *p;
+
+  acquire(&ptable.lock);
+
+  for (int i = 0; i < NPROC; i++) {
+    p = &ptable.proc[i];
+
+    ps->inuse[i] = (p->state != UNUSED);
+    ps->pid[i] = p->pid;
+    ps->priority[i] = p->priority;
+    ps->state[i] = p->state;
+
+    for (int j = 0; j < MLFQ_LEVELS; j++) {
+      ps->ticks[i][j] = p->ticks[j];
+      ps->wait_ticks[i][j] = p->wait_ticks[j];
+    }
+  }
+
+  release(&ptable.lock);
+  return 0;
+}
+

@@ -1,3 +1,8 @@
+#ifndef PROC_H
+#define PROC_H
+
+#include "pstat.h"
+
 // Per-CPU state
 struct cpu {
   uchar apicid;                // Local APIC ID
@@ -8,6 +13,7 @@ struct cpu {
   int ncli;                    // Depth of pushcli nesting.
   int intena;                  // Were interrupts enabled before pushcli?
   struct proc *proc;           // The process running on this cpu or null
+  int sched_policy; //운영체제가 지금 어떤 스케줄링 쓰는지 (0: RR, 1: MLFQ, 2: no track, 3: no boost)
 };
 
 extern struct cpu cpus[NCPU];
@@ -49,6 +55,13 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int priority; // 현재 우선순위 (0: Q3, 1: Q2, 2: Q1, 3: Q0)
+  int ticks[4]; //각 우선순위에서 얼마나 실행했는지
+  int wait_ticks[4];// 각 우선순위에서 얼마나 기다렸는지
+
+
+
 };
 
 // Process memory is laid out contiguously, low addresses first:
@@ -56,3 +69,27 @@ struct proc {
 //   original data and bss
 //   fixed-size stack
 //   expandable heap
+
+
+// MLFQ 큐 구조 정의
+#define MLFQ_LEVELS 4
+#define QUEUE_SIZE NPROC
+
+struct queue {
+  struct proc* q[QUEUE_SIZE];  // 프로세스가 들어갈 자리
+  int front, rear;             // 큐의 앞/뒤 위치
+};
+
+// MLFQ 큐 전역 배열 선언 
+extern struct queue mlfq[MLFQ_LEVELS];  // Q3~Q0 큐 총 4개
+
+void initqueue(struct queue *q);
+void enqueue(struct queue *q, struct proc *p);
+struct proc* dequeue(struct queue *q);
+int isempty(struct queue *q);
+
+
+int setSchedPolicy(int policy);
+int getpinfo(struct pstat *);
+
+#endif // PROC_H

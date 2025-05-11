@@ -1,5 +1,8 @@
 struct stat;
 struct rtcdate;
+struct pstat;
+
+
 
 // system calls
 int fork(void);
@@ -23,6 +26,9 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int setSchedPolicy(int); //시스템콜 추가
+int getpinfo(struct pstat*);
+int yield(void);
 
 // ulib.c
 int stat(char*, struct stat*);
