@@ -12,4 +12,4 @@ struct pstat {
   int wait_ticks[NPROC][4];   // 대기 시간
 };
 
-#endif 
+#endif // _PSTAT_H_

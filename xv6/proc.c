@@ -7,7 +7,6 @@
 #include "proc.h"
 #include "spinlock.h"
 #include "debug.h"
-#include "pstat.h"
 
 struct {
   struct spinlock lock;
@@ -21,8 +20,9 @@ static struct proc *initproc;
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
-
 static void wakeup1(void *chan);
+
+int max_tick[4] = {0, 32, 16, 8};  // Q0은 FIFO라서 0
 
 void
 pinit(void)
@@ -65,13 +65,14 @@ mycpu(void)
 
 // Disable interrupts so that we are not rescheduled
 // while reading proc from the cpu structure
-struct proc*
+struct proc* //수정
 myproc(void) {
   struct cpu *c;
   struct proc *p;
+  
   pushcli();
-  c = mycpu();
-  p = c->proc;
+  c= mycpu();
+  p=c->proc;
   popcli();
   return p;
 }
@@ -98,16 +99,15 @@ allocproc(void)
   return 0;
 
 found:
+  memset(p, 0, sizeof(*p));  // ← 이거 꼭 필요함!
   p->state = EMBRYO;
   p->pid = nextpid++;
 
   //추가
   p->priority = 3;  // Q3에서 시작
+  memset(p->ticks, 0, sizeof(p->ticks));
+  memset(p->wait_ticks, 0, sizeof(p->wait_ticks)); //
 
-  for (int i = 0; i < MLFQ_LEVELS; i++) {
-    p->ticks[i] = 0;
-    p->wait_ticks[i] = 0;
-  }
   
   release(&ptable.lock);
 
@@ -170,7 +170,7 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
-  enqueue(&mlfq[3], p);  // 
+  enqueue(&mlfq[3], p);  // ← 필수!
   release(&ptable.lock);
 }
 
@@ -210,11 +210,6 @@ fork(void)
     return -1;
   }
 
-  for (int i = 0; i < MLFQ_LEVELS; i++) {
-    np->ticks[i] = 0;
-    np->wait_ticks[i] = 0;
-  }
-
   // Copy process state from proc.
   if((np->pgdir = copyuvm(curproc->pgdir, curproc->sz)) == 0){
     kfree(np->kstack);
@@ -241,9 +236,8 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
-  np->priority = 3;                // 기본 priority 지정
-  enqueue(&mlfq[3], np);
-
+  np->priority = 3;
+  enqueue(&mlfq[3], np);  // ← 필수!
   release(&ptable.lock);
 
   return pid;
@@ -358,17 +352,17 @@ scheduler(void)
     sti();
     acquire(&ptable.lock);
 
-    int found = 0;
+    int scheduled = 0;
 
-    // MLFQ 정책인 경우
-    if (mycpu()->sched_policy == 1) {
+    // MLFQ 
+    if (c->sched_policy == 1) {
       for(int level =3; level >= 0; level--)  {
         while (!isempty(&mlfq[level])) {
           p = dequeue(&mlfq[level]);
           if ( !p || p->state != RUNNABLE)
-          continue;
+            continue;
 
-          found = 1;
+          scheduled = 1;
 
           c->proc = p;
           switchuvm(p);
@@ -379,25 +373,34 @@ scheduler(void)
 
           c->proc = 0;
 
-          // time slice 기반으로 demotion 판단
-          int time_slice[4] = {0,32,16,8};  // Q0는 FIFO
-          if (level > 0 && p->ticks[level] >= time_slice[level]) {
-            p->ticks[level] = 0;        // 현재 큐 실행 시간 초기화
-            p->priority = level - 1;    // 우선순위 강등
-            enqueue(&mlfq[p->priority], p);  // 아래 큐에 넣기
-          } else {
-            enqueue(&mlfq[level], p);   // 다시 현재 큐로
+          int cur_lvl = p->priority;
+
+          // ✳️ demote 기준은 trap.c에서 tick 누적값을 기반으로
+          // trap.c에서 tick 누적하고 여기서 demote 판단
+          if (p->state == RUNNABLE && p->ticks[cur_lvl] >= max_tick[cur_lvl]) {
+            if (cur_lvl > 0){
+              p->priority--;
+              cprintf("[demote] pid %d: Q%d → Q%d (tick=%d)\n",
+                      p->pid, cur_lvl, p->priority, p->ticks[cur_lvl]);
+            }
+            p->ticks[cur_lvl] = 0;
+            p->wait_ticks[cur_lvl] = 0;
           }
+          //  enqueue는 priority에 따라 다시 큐로
+          enqueue(&mlfq[p->priority], p);  // 아래 큐에 넣기
+          cprintf("[requeue] pid %d: stay Q%d (tick=%d)\n",
+                  p->pid, p->priority, p->ticks[p->priority]);
           break;
         }
-        if (found) break;
+        if (scheduled) break;
       }
     }
-    if (!found && mycpu()->sched_policy != 1) {
+          
+    //RR
+    if (!scheduled) {
       for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
         if (p->state != RUNNABLE)
           continue;
-        found = 1;
         c->proc = p;
         switchuvm(p);
         p->state = RUNNING;
@@ -443,16 +446,13 @@ sched(void)
 // Give up the CPU for one scheduling round.
 void
 yield(void)
-{
-  acquire(&ptable.lock);  //DOC: yieldlock
+{ 
   struct proc *curproc = myproc();
+  acquire(&ptable.lock);  
 
-  // MLFQ 정책일 경우 RUNNABLE 상태일 때 큐에 다시 넣기
-  if (mycpu()->sched_policy == 1) {
-    enqueue(&mlfq[curproc->priority], curproc);
-  }
   curproc->state = RUNNABLE;
-  sched();
+  sched();  // enqueue는 scheduler가 책임진다!
+
   release(&ptable.lock);
 }
 
@@ -576,7 +576,7 @@ int isempty(struct queue *q) {
 void enqueue(struct queue *q, struct proc *p) {
   //이미 들어있는지 검사
   for (int i = q->front; i < q->rear; i++) {
-    if (q->q[i % QUEUE_SIZE] == p)
+    if (q->q[i] == p)
       return; //중복 방지
   }
   q->q[q->rear % QUEUE_SIZE] = p;
@@ -653,12 +653,16 @@ getpinfo(struct pstat *ps)
   for (int i = 0; i < NPROC; i++) {
     p = &ptable.proc[i];
 
-    ps->inuse[i] = (p->state != UNUSED);
+    if (p->state != UNUSED)
+    ps->inuse[i] = 1;
+    else
+    ps->inuse[i] = 0;
+
     ps->pid[i] = p->pid;
     ps->priority[i] = p->priority;
     ps->state[i] = p->state;
 
-    for (int j = 0; j < MLFQ_LEVELS; j++) {
+    for (int j = 0; j < 4; j++) {
       ps->ticks[i][j] = p->ticks[j];
       ps->wait_ticks[i][j] = p->wait_ticks[j];
     }

@@ -14,6 +14,10 @@ extern struct {
   struct proc proc[NPROC];
 } ptable;
 
+extern struct queue mlfq[MLFQ_LEVELS];  // MLFQ 큐 사용
+extern struct proc* myproc(void);
+
+
 // Interrupt descriptor table (shared by all CPUs).
 struct gatedesc idt[256];
 extern uint vectors[];  // in vectors.S: array of 256 entry pointers
@@ -62,55 +66,63 @@ trap(struct trapframe *tf)
     }
     // 현재 실행 중인 프로세스의 tick 증가
     struct proc *curproc = myproc();
-    if (curproc && curproc->state == RUNNING) {
-      int q = curproc->priority;
-      curproc->ticks[q]++;
-    }
-    
+    int sched = mycpu()->sched_policy;
+
     acquire(&ptable.lock);
-    //// RUNNABLE 상태인 다른 프로세스들의 wait_ticks 증가
-    for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-      if (p->state == RUNNABLE && p != curproc) {
-        int q = p->priority;
-        if ( q >=0 && q< MLFQ_LEVELS){
-          p->wait_ticks[q]++;
-        }
-        
+
+    if (sched == 1 && curproc && curproc->state == RUNNING) {
+      int level = curproc->priority;
+      if (level >= 0 && level <= 3) {
+        curproc->ticks[level]++;
+        cprintf("[tick] pid %d Q%d ticks: %d\n", curproc->pid, level, curproc->ticks[level]);
+
       }
-    }
-    //priority boost 조건 확인 (policy == 1일 때만)
-    if (mycpu()->sched_policy == 1) {
+      //wait_ticks 증가
       for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-        if (p -> state != RUNNABLE) continue;
-        int q = p->priority;
-        //Q0 -> Q1
-        if (q == 0 && p->wait_ticks[0] >= 500) {
+        if ( p == curproc || p -> state == RUNNABLE){
+          continue;
+        }
+        int plevel = p->priority;
+        if (plevel >=0 && plevel <=3){
+            p->wait_ticks[level]++;
+        }
+      }
+      //boost check
+      for (struct proc *p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if (p->state != RUNNABLE)
+          continue;
+        int plevel = p->priority;
+
+        if (plevel == 0 && p->wait_ticks[0] >= 500) {
           p->priority = 1;
           p->wait_ticks[0] = 0;
           enqueue(&mlfq[1], p);
-        }
-  
-        // Q1 -> Q2
-        if (q == 1 && p->wait_ticks[1] >= 160){
-          p->priority = 2;  
+          cprintf("[boost] pid %d: Q0→Q1\n", p->pid);
+        } 
+        else if (plevel == 1 && p->wait_ticks[1] >= 320) {
+          p->priority = 2;
           p->wait_ticks[1] = 0;
           enqueue(&mlfq[2], p);
-        }
-        //Q2 ->Q3
-        else if (q == 2 && p->wait_ticks[2] >= 80){
+          cprintf("[boost] pid %d: Q1→Q2\n", p->pid);
+        } 
+        else if (plevel == 2 && p->wait_ticks[2] >= 160) {
           p->priority = 3;
           p->wait_ticks[2] = 0;
           enqueue(&mlfq[3], p);
+          cprintf("[boost] pid %d: Q2→Q3\n", p->pid);
+
         }
-        
       }
     }
+        
     release(&ptable.lock);
-
- 
   
+    if (sched == 1 && curproc && curproc->state == RUNNING)
+      yield();  // ✅ MLFQ일 때만 yield
+    
     lapiceoi();
     break;
+
   case T_IRQ0 + IRQ_IDE:
     ideintr();
     lapiceoi();
@@ -160,11 +172,12 @@ trap(struct trapframe *tf)
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
-  if(myproc() && myproc()->state == RUNNING &&
+
+  /*if(myproc() && myproc()->state == RUNNING &&
      tf->trapno == T_IRQ0+IRQ_TIMER)
-    yield();
+     yield();*/
 
   // Check if the process has been killed since we yielded
-  if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
-    exit();
+  /*if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)
+    exit();*/
 }
