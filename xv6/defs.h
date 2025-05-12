@@ -122,6 +122,7 @@ int             wait(void);
 void            wakeup(void*);
 void            yield(void);
 int             getpinfo(struct pstat *ps);
+int             setSchedPolicy(int);
 
 
 // swtch.S

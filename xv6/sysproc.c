@@ -106,7 +106,7 @@ int
 sys_getpinfo(void)
 {
   struct pstat *ps;
-  if (argptr(0, (void*)&ps, sizeof(*ps)) < 0 || ps ==0)
+  if (argptr(0, (char**)&ps, sizeof(*ps)) < 0 )
     return -1;
   return getpinfo(ps);
 }

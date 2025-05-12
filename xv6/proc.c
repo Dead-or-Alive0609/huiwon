@@ -7,32 +7,25 @@
 #include "proc.h"
 #include "spinlock.h"
 #include "debug.h"
+#include "pstat.h"
 
 struct {
   struct spinlock lock;
   struct proc proc[NPROC];
 } ptable;
 
-struct queue mlfq[MLFQ_LEVELS];  // MLFQ 큐 4개 (Q3~Q0)
-
 static struct proc *initproc;
 
 int nextpid = 1;
 extern void forkret(void);
 extern void trapret(void);
-static void wakeup1(void *chan);
 
-int max_tick[4] = {0, 32, 16, 8};  // Q0은 FIFO라서 0
+static void wakeup1(void *chan);
 
 void
 pinit(void)
 {
   initlock(&ptable.lock, "ptable");
-
-  //MLFQ 큐 4개 초기화
-  for (int i = 0; i < MLFQ_LEVELS; i++) {
-    initqueue(&mlfq[i]);
-  }
 }
 
 // Must be called with interrupts disabled
@@ -65,14 +58,13 @@ mycpu(void)
 
 // Disable interrupts so that we are not rescheduled
 // while reading proc from the cpu structure
-struct proc* //수정
+struct proc*
 myproc(void) {
   struct cpu *c;
   struct proc *p;
-  
   pushcli();
-  c= mycpu();
-  p=c->proc;
+  c = mycpu();
+  p = c->proc;
   popcli();
   return p;
 }
@@ -99,17 +91,15 @@ allocproc(void)
   return 0;
 
 found:
-  memset(p, 0, sizeof(*p));  // ← 이거 꼭 필요함!
   p->state = EMBRYO;
   p->pid = nextpid++;
+  // 추가
+  p->priority = 3; //Q3에서 시작
+  memset(p->ticks, 0, sizeof(p->ticks)); //초기화
+  memset(p->wait_ticks, 0, sizeof(p->wait_ticks)); // 초기화
 
-  //추가
-  p->priority = 3;  // Q3에서 시작
-  memset(p->ticks, 0, sizeof(p->ticks));
-  memset(p->wait_ticks, 0, sizeof(p->wait_ticks)); //
-
-  
   release(&ptable.lock);
+
 
   // Allocate kernel stack.
   if((p->kstack = kalloc()) == 0){
@@ -170,7 +160,7 @@ userinit(void)
   acquire(&ptable.lock);
 
   p->state = RUNNABLE;
-  enqueue(&mlfq[3], p);  // ← 필수!
+
   release(&ptable.lock);
 }
 
@@ -236,8 +226,7 @@ fork(void)
   acquire(&ptable.lock);
 
   np->state = RUNNABLE;
-  np->priority = 3;
-  enqueue(&mlfq[3], np);  // ← 필수!
+
   release(&ptable.lock);
 
   return pid;
@@ -349,68 +338,100 @@ scheduler(void)
   c->proc = 0;
 
   for (;;) {
-    sti();
+    sti();  // 인터럽트 허용
+
     acquire(&ptable.lock);
 
-    int scheduled = 0;
+    int policy = c->sched_policy;  // 현재 설정된 스케줄링 정책
+    
+    //RR
+    if (policy == 0) {
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if (p->state != RUNNABLE)
+          continue;
 
-    // MLFQ 
-    if (c->sched_policy == 1) {
-      for(int level =3; level >= 0; level--)  {
-        while (!isempty(&mlfq[level])) {
-          p = dequeue(&mlfq[level]);
-          if ( !p || p->state != RUNNABLE)
+        c->proc = p;
+        switchuvm(p);
+        p->state = RUNNING;
+
+        swtch(&(c->scheduler), p->context);
+        switchkvm();
+        c->proc = 0;
+      }
+    } else {
+      // MLFQ
+
+      // Boosting
+      if (policy != 3) {
+        for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+          if (p->state != RUNNABLE)
             continue;
 
-          scheduled = 1;
+          int pr = p->priority;
+
+          if ((pr == 2 && p->wait_ticks[2] >= 160) ||
+              (pr == 1 && p->wait_ticks[1] >= 320) ||
+              (pr == 0 && p->wait_ticks[0] >= 500)) {
+            if (p->priority < 3)
+              p->priority++;
+            memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
+          }
+        }
+      }
+
+      // Time slice 
+      int slice[4] = { -1, 32, 16, 8 };
+
+      int scheduled = 0;
+
+      // Q3부터 순차적으로 찾기
+      for (int level = 3; level >= 0 && !scheduled; level--) {
+        for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+          if (p->state != RUNNABLE || p->priority != level)
+            continue;
 
           c->proc = p;
           switchuvm(p);
           p->state = RUNNING;
 
-          swtch(&c->scheduler, p->context);
-          switchkvm();
+          int pr = p -> priority;
 
+          swtch(&(c->scheduler), p->context);
+          switchkvm();
           c->proc = 0;
 
-          int cur_lvl = p->priority;
+          // 정책 2번: tick에 따라 강등
+          if (policy == 2) {
+            if ((pr == 3 && p->ticks[3] >= 8) ||
+                (pr == 2 && p->ticks[2] >= 16) ||
+                (pr == 1 && p->ticks[1] >= 32)) {
 
-          // ✳️ demote 기준은 trap.c에서 tick 누적값을 기반으로
-          // trap.c에서 tick 누적하고 여기서 demote 판단
-          if (p->state == RUNNABLE && p->ticks[cur_lvl] >= max_tick[cur_lvl]) {
-            if (cur_lvl > 0){
-              p->priority--;
-              cprintf("[demote] pid %d: Q%d → Q%d (tick=%d)\n",
-                      p->pid, cur_lvl, p->priority, p->ticks[cur_lvl]);
+              if (p->priority > 0){
+                p->priority--;
+              }
+              memset(p->ticks, 0, sizeof(p->ticks));
             }
-            p->ticks[cur_lvl] = 0;
-            p->wait_ticks[cur_lvl] = 0;
           }
-          //  enqueue는 priority에 따라 다시 큐로
-          enqueue(&mlfq[p->priority], p);  // 아래 큐에 넣기
-          cprintf("[requeue] pid %d: stay Q%d (tick=%d)\n",
-                  p->pid, p->priority, p->ticks[p->priority]);
+
+          // 정책 1 & 3: slice 기반 강등
+          else {
+            if ((pr == 3 && p->ticks[3] >= slice[3]) ||
+                (pr == 2 && p->ticks[2] >= slice[2]) ||
+                (pr == 1 && p->ticks[1] >= slice[1])) {
+              if (p->priority > 0){
+                p->priority--;
+              }
+              memset(p->ticks, 0, sizeof(p->ticks));
+
+            }
+          }
+
+          scheduled = 1;
           break;
         }
-        if (scheduled) break;
       }
     }
-          
-    //RR
-    if (!scheduled) {
-      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-        if (p->state != RUNNABLE)
-          continue;
-        c->proc = p;
-        switchuvm(p);
-        p->state = RUNNING;
 
-        swtch(&c->scheduler, p->context);
-        switchkvm();
-
-        c->proc = 0;
-      }
-    }
     release(&ptable.lock);
   }
 }
@@ -446,16 +467,12 @@ sched(void)
 // Give up the CPU for one scheduling round.
 void
 yield(void)
-{ 
-  struct proc *curproc = myproc();
-  acquire(&ptable.lock);  
-
-  curproc->state = RUNNABLE;
-  sched();  // enqueue는 scheduler가 책임진다!
-
+{
+  acquire(&ptable.lock);  //DOC: yieldlock
+  myproc()->state = RUNNABLE;
+  sched();
   release(&ptable.lock);
 }
-
 
 // A fork child's very first scheduling by scheduler()
 // will swtch here.  "Return" to user space.
@@ -561,37 +578,6 @@ kill(int pid)
   release(&ptable.lock);
   return -1;
 }
-//큐 초기화
-void initqueue(struct queue *q) {
-  q->front = 0;
-  q->rear = 0;
-}
-
-// 큐가 비었는지 확인
-int isempty(struct queue *q) {
-  return q->front == q->rear;
-}
-
-// 큐에 중복없이 프로세스 추가
-void enqueue(struct queue *q, struct proc *p) {
-  //이미 들어있는지 검사
-  for (int i = q->front; i < q->rear; i++) {
-    if (q->q[i] == p)
-      return; //중복 방지
-  }
-  q->q[q->rear % QUEUE_SIZE] = p;
-  q->rear++;
-}
-
-// 큐에서 프로세스 꺼내기
-struct proc* dequeue(struct queue *q) {
-  if (isempty(q))
-    return 0;
-  struct proc *p = q->q[q->front % QUEUE_SIZE];
-  q->front++;
-  return p;
-}
-
 
 //PAGEBREAK: 36
 // Print a process listing to console.  For debugging.
@@ -629,16 +615,22 @@ procdump(void)
     cprintf("\n");
   }
 }
-//추가
+//setSchedPolicy 
+
+//  0 (RR), 1 (MLFQ), 2 (MLFQ-no-tracking), 3 (MLFQ-no-boosting)
+
 int
 setSchedPolicy(int policy)
 {
-  if (policy < 0 || policy > 3)  // 정책 번호 범위 확인
+
+  if (policy < 0 || policy > 3)
     return -1;
-  
-  pushcli(); //인터럽트 끄기
-  mycpu()->sched_policy = policy;
-  popcli(); //인터럽트 켜기
+
+  pushcli();
+  struct cpu *c = mycpu();
+  c->sched_policy = policy;
+  popcli();
+
   return 0;
 }
 
@@ -647,28 +639,31 @@ int
 getpinfo(struct pstat *ps)
 {
   struct proc *p;
+  int i = 0;
 
-  acquire(&ptable.lock);
+  acquire(&ptable.lock);  
 
-  for (int i = 0; i < NPROC; i++) {
-    p = &ptable.proc[i];
+  for(p = ptable.proc; p < &ptable.proc[NPROC]; p++, i++) {
+    // 프로세스가 사용 중이면 1, 아니면 0
+    ps->inuse[i] = (p->state != UNUSED);
 
-    if (p->state != UNUSED)
-    ps->inuse[i] = 1;
-    else
-    ps->inuse[i] = 0;
-
+    // pid 저장
     ps->pid[i] = p->pid;
+
+    // 현재 우선순위 저장 
     ps->priority[i] = p->priority;
+
+    // 현재 상태 저장 
     ps->state[i] = p->state;
 
+    // 각 큐에서 실행된 tick 수 저장
     for (int j = 0; j < 4; j++) {
       ps->ticks[i][j] = p->ticks[j];
       ps->wait_ticks[i][j] = p->wait_ticks[j];
     }
   }
 
-  release(&ptable.lock);
-  return 0;
-}
+  release(&ptable.lock);  
 
+  return 0; 
+}

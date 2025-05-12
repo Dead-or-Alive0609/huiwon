@@ -1,6 +1,3 @@
-#ifndef _PSTAT_H_
-#define _PSTAT_H_
-
 #include "param.h"
 
 struct pstat {
@@ -11,5 +8,3 @@ struct pstat {
   int ticks[NPROC][4];        // 실행 시간
   int wait_ticks[NPROC][4];   // 대기 시간
 };
-
-#endif // _PSTAT_H_

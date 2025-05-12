@@ -28,7 +28,7 @@ int sleep(int);
 int uptime(void);
 int setSchedPolicy(int policy); //시스템콜 추가
 int getpinfo(struct pstat*);
-int yield(void);
+
 
 // ulib.c
 int stat(char*, struct stat*);
