@@ -62,13 +62,15 @@ trap(struct trapframe *tf)
     }
     //추가
     struct proc *curproc = myproc();
-
+    
+    // 현재 실행 중인 프로세스의 ticks 증가
     if (curproc && curproc->state == RUNNING) {
       int q = curproc->priority;
-      curproc->ticks[q]++;
+      if (q >= 0 && q <= 3)
+        curproc->ticks[q]++;
 
     }
-    // RUNNABLE 상태이면서 현재 실행 중이 아닌 애들: wait_ticks 증가
+    // 다른 RUNNABLE한 프로세스들 wait_ticks 증가
     acquire(&ptable.lock);
     struct proc *p;
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
@@ -77,11 +79,10 @@ trap(struct trapframe *tf)
       }
     }
     release(&ptable.lock);
-    if (curproc && curproc->state == RUNNING){
-    yield();  // CPU 양보
-    }
-
     lapiceoi();
+    if (curproc && curproc->state == RUNNING){
+      yield();  // CPU 양보
+    }
     break;
 
   case T_IRQ0 + IRQ_IDE:
@@ -133,9 +134,9 @@ trap(struct trapframe *tf)
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
-  if(myproc() && myproc()->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER){
+  /* if(myproc() && myproc()->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER){
       yield();
-  }
+  }*/
 
   // Check if the process has been killed since we yielded
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)

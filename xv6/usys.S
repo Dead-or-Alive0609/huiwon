@@ -31,4 +31,4 @@ SYSCALL(sleep)
 SYSCALL(uptime)
 SYSCALL(setSchedPolicy) 
 SYSCALL(getpinfo)
-
+SYSCALL(yield)

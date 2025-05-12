@@ -341,7 +341,6 @@ scheduler(void)
 
   for (;;) {
     sti();  // 인터럽트 허용
-
     acquire(&ptable.lock);
 
     int policy = c->sched_policy;  // 현재 설정된 스케줄링 정책
@@ -362,22 +361,31 @@ scheduler(void)
       }
     } else {
       // MLFQ
+      // RUNNABLE 상태 프로세스들의 wait_ticks 증가
+      for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
+        if ((p->state == RUNNABLE || p->state == SLEEPING) && p!=c->proc) {
+          p->wait_ticks[p->priority]++;
+        }
+      }
 
       // Boosting
       if (policy != 3) {
         for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-          if (p->state != RUNNABLE)
+          if (p->state != RUNNABLE && p->state != SLEEPING)
             continue;
 
           int curq = p->priority;
           int boost_limit[] = {500, 320, 160};
-
-          if (curq < 3 && p->wait_ticks[curq] >= boost_limit[3 - curq]){
-            p->priority++;
-            for (int i=0; i<4; i++)
-              p->wait_ticks[i]=0;
-
-            //memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
+          // Boost 조건
+          if (curq == 0 && p->wait_ticks[0] >= boost_limit[0]){
+            p->priority = 1;
+            memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
+          } else if (curq == 1 && p->wait_ticks[1] >= boost_limit[1]){
+            p->priority = 2;
+            memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
+          } else if (curq == 2 && p->wait_ticks[2] >= boost_limit[2]){
+            p->priority = 3;
+            memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
 
           }
         }
@@ -386,10 +394,10 @@ scheduler(void)
       // Time slice 
       int slice[4] = { -1, 32, 16, 8 };
 
-      int done = 0;
+      //int done = 0;
 
       // Q3부터 순차적으로 찾기
-      for (int q = 3; q >= 0 && !done; q--) {
+      for (int q = 3; q >= 0 ; q--) {
         for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
           if (p->state != RUNNABLE || p->priority != q)
             continue;
@@ -403,11 +411,9 @@ scheduler(void)
           switchkvm();
           c->proc = 0;
 
-          // 정책 2번: tick에 따라 강등
+          // Demote (정책 2번): tick에 따라 강등
           if (policy == 2) {
-            if ((pr == 3 && p->ticks[3] >= 8) ||
-                (pr == 2 && p->ticks[2] >= 16) ||
-                (pr == 1 && p->ticks[1] >= 32)) {
+            if ((pr == 3 && p->ticks[3] >= 8) || (pr == 2 && p->ticks[2] >= 16) ||(pr == 1 && p->ticks[1] >= 32)) {
 
               if (p->priority > 0){
                 p->priority--;
@@ -415,7 +421,6 @@ scheduler(void)
               memset(p->ticks, 0, sizeof(p->ticks));
             }
           }
-
           // 정책 1 & 3: slice 기반 강등
           else {
             if ((pr == 3 && p->ticks[3] >= slice[3]) ||
@@ -428,9 +433,6 @@ scheduler(void)
 
             }
           }
-
-          done = 1;
-          break;
         }
       }
     }

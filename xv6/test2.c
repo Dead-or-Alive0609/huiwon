@@ -1,80 +1,71 @@
-//출력되긴하는데 엄청 오래걸림
-//그리고 이상해.
 #include "types.h"
 #include "user.h"
 #include "pstat.h"
 
 #define NUM_PROCS 4
+#define ITER 20
+
+
 
 int workload(int n) {
   int i, j = 0;
-  for (i = 0; i < n; i++)
-    j += i * j + 1;
+  volatile int x = 0;
+  for (i = 0; i < n; i++) {
+    x += i % 3;
+    j += x + i;
+  }
   return j;
 }
 
 int main(void) {
   struct pstat st;
   int pids[NUM_PROCS];
-  int i;
 
   printf(1, "\n==== [TEST2: MLFQ w/o tracking] ====\n");
 
   if (setSchedPolicy(2) < 0) {
-    printf(1, "setSchedPolicy failed!\n");
+    printf(1, "setSchedPolicy(2) failed!\n");
     exit();
   }
 
-  for (i = 0; i < NUM_PROCS; i++) {
+  for (int i = 0; i < NUM_PROCS; i++) {
     int pid = fork();
     if (pid == 0) {
       // 자식 프로세스
-      while (1) {
-        // 점점 더 무거운 workload
-        if (i == 0)
-          workload(1000000);   // Q3 예상
-        else if (i == 1)
-          workload(4000000);   // Q2 예상
-        else if (i == 2)
-          workload(10000000);  // Q1 예상
-        else
-          workload(15000000);  // Q0 예상 (하지만 yield 없음은 위험)
-
-        sleep(3);  // 모든 프로세스가 최소한 CPU 양보하도록
+      for (int t = 0; t < ITER; t++) {
+        workload((i + 1) * 2000000);  // Q 강등 유도용
+        sleep(10);  // yield() 유도
+        if (t % 5 == 0 && getpid() % 2 == 0) sleep(0);  // 일부러 섞기
       }
+      exit();
     } else {
       pids[i] = pid;
-      printf(1, "[parent] 자식 프로세스 pid[%d] = %d\n", i, pid);
     }
   }
 
-  sleep(3000);  // 충분히 돌아갈 시간 확보
+  sleep(300);  // 충분한 실행 시간
 
   if (getpinfo(&st) < 0) {
-    printf(1, "getpinfo failed\n");
+    printf(1, "getpinfo 실패\n");
     exit();
   }
 
-  printf(1, "\n[결과] 각 프로세스의 우선순위 및 큐별 tick 정보:\n\n");
-
-  for (i = 0; i < NPROC; i++) {
-    if (st.inuse[i]) {
-      for (int j = 0; j < NUM_PROCS; j++) {
-        if (st.pid[i] == pids[j]) {
-          printf(1, "▶ 프로세스 %d (PID %d): 현재 큐 → Q%d\n", j + 1, st.pid[i], st.priority[i]);
-          printf(1, "   ticks       : Q0:%d  Q1:%d  Q2:%d  Q3:%d\n",
-                 st.ticks[i][0], st.ticks[i][1], st.ticks[i][2], st.ticks[i][3]);
-          printf(1, "   wait_ticks  : Q0:%d  Q1:%d  Q2:%d  Q3:%d\n\n",
-                 st.wait_ticks[i][0], st.wait_ticks[i][1], st.wait_ticks[i][2], st.wait_ticks[i][3]);
-        }
+  printf(1, "\n=== [RESULT: TEST2 - policy 2] ===\n");
+  for (int i = 0; i < NPROC; i++) {
+    for (int j = 0; j < NUM_PROCS; j++) {
+      if (st.inuse[i] && st.pid[i] == pids[j]) {
+        printf(1, "▶ Process %d (PID %d): 최종 Q → Q%d\n", j + 1, st.pid[i], st.priority[i]);
+        printf(1, "   ticks      : [Q0:%d Q1:%d Q2:%d Q3:%d]\n",
+               st.ticks[i][0], st.ticks[i][1], st.ticks[i][2], st.ticks[i][3]);
+        printf(1, "   wait_ticks : [Q0:%d Q1:%d Q2:%d Q3:%d]\n\n",
+               st.wait_ticks[i][0], st.wait_ticks[i][1],
+               st.wait_ticks[i][2], st.wait_ticks[i][3]);
       }
     }
   }
 
-  for (i = 0; i < NUM_PROCS; i++)
-    kill(pids[i]);
-  for (i = 0; i < NUM_PROCS; i++)
-    wait();
+  for (int i = 0; i < NUM_PROCS; i++) kill(pids[i]);
+  for (int i = 0; i < NUM_PROCS; i++) wait();
 
   printf(1, "==== 종료 ====\n");
   exit();
