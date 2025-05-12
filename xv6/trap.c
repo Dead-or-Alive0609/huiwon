@@ -61,21 +61,21 @@ trap(struct trapframe *tf)
       release(&tickslock);
     }
     //추가
-    struct cpu *c = &cpus[cpuid()];
-    struct proc *curproc = c->proc;
+    struct proc *curproc = myproc();
 
     if (curproc && curproc->state == RUNNING) {
-      int pr = curproc->priority;
+      int q = curproc->priority;
 
-      curproc->ticks[pr]++;
+      curproc->ticks[q]++;
+      cprintf("[TRAP] pid %d | Q%d | tick=%d\n", curproc->pid, q, curproc->ticks[q]);
+
     }
     // RUNNABLE 상태이면서 현재 실행 중이 아닌 애들: wait_ticks 증가
     acquire(&ptable.lock);
     struct proc *p;
     for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
       if (p != curproc && p->state == RUNNABLE) {
-        int pr = p->priority;
-        p->wait_ticks[pr]++;
+        p->wait_ticks[p->priority]++;
       }
     }
     release(&ptable.lock);
@@ -132,9 +132,10 @@ trap(struct trapframe *tf)
 
   // Force process to give up CPU on clock tick.
   // If interrupts were on while locks held, would need to check nlock.
-  if(myproc() && myproc()->state == RUNNING &&
-     tf->trapno == T_IRQ0+IRQ_TIMER)
-    yield();
+  if(myproc() && myproc()->state == RUNNING && tf->trapno == T_IRQ0+IRQ_TIMER){
+      cprintf("[YIELD] from pid %d\n", myproc()->pid);
+      yield();
+  }
 
   // Check if the process has been killed since we yielded
   if(myproc() && myproc()->killed && (tf->cs&3) == DPL_USER)

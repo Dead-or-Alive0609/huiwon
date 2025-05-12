@@ -43,7 +43,7 @@ int main(void) {
 
         // i < 3 까지만 yield 호출 → Q0까지는 안감
         if (i < 3)
-          sleep(1);
+          sleep(3);
       }
     } else {
       // 부모는 pid 저장
@@ -54,7 +54,7 @@ int main(void) {
   }
 
   // 충분히 실행할 시간 대기
-  sleep(300);
+  sleep(3000);
 
   if (getpinfo(&st) < 0) {
     printf(1, "getpinfo failed\n");

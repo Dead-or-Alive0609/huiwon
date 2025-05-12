@@ -93,12 +93,14 @@ allocproc(void)
 found:
   p->state = EMBRYO;
   p->pid = nextpid++;
-  // 추가
+  
+  release(&ptable.lock);
+  
   p->priority = 3; //Q3에서 시작
   memset(p->ticks, 0, sizeof(p->ticks)); //초기화
   memset(p->wait_ticks, 0, sizeof(p->wait_ticks)); // 초기화
 
-  release(&ptable.lock);
+  
 
 
   // Allocate kernel stack.
@@ -367,14 +369,14 @@ scheduler(void)
           if (p->state != RUNNABLE)
             continue;
 
-          int pr = p->priority;
+          int curq = p->priority;
+          int boost_limit[] = {500, 320, 160};
 
-          if ((pr == 2 && p->wait_ticks[2] >= 160) ||
-              (pr == 1 && p->wait_ticks[1] >= 320) ||
-              (pr == 0 && p->wait_ticks[0] >= 500)) {
-            if (p->priority < 3)
-              p->priority++;
+          if (curq < 3 && p->wait_ticks[curq] >= boost_limit[3 - curq]){
+            p->priority++;
             memset(p->wait_ticks, 0, sizeof(p->wait_ticks));
+            cprintf("[BOOST] pid %d: wait_ticks = %d → Q%d\n", p->pid, p->wait_ticks[curq], p->priority);
+
           }
         }
       }
@@ -382,17 +384,19 @@ scheduler(void)
       // Time slice 
       int slice[4] = { -1, 32, 16, 8 };
 
-      int scheduled = 0;
+      int done = 0;
 
       // Q3부터 순차적으로 찾기
-      for (int level = 3; level >= 0 && !scheduled; level--) {
+      for (int q = 3; q >= 0 && !done; q--) {
         for (p = ptable.proc; p < &ptable.proc[NPROC]; p++) {
-          if (p->state != RUNNABLE || p->priority != level)
+          if (p->state != RUNNABLE || p->priority != q)
             continue;
 
           c->proc = p;
           switchuvm(p);
           p->state = RUNNING;
+          cprintf("[SCHED] 선택된 pid: %d (Q%d)\n", p->pid, p->priority);  // 🔥 여기
+
 
           int pr = p -> priority;
 
@@ -407,6 +411,7 @@ scheduler(void)
                 (pr == 1 && p->ticks[1] >= 32)) {
 
               if (p->priority > 0){
+                cprintf("[DEMOTE] pid %d: Q%d → Q%d\n", p->pid, pr, pr - 1);
                 p->priority--;
               }
               memset(p->ticks, 0, sizeof(p->ticks));
@@ -419,6 +424,8 @@ scheduler(void)
                 (pr == 2 && p->ticks[2] >= slice[2]) ||
                 (pr == 1 && p->ticks[1] >= slice[1])) {
               if (p->priority > 0){
+                cprintf("[DEMOTE] pid %d: Q%d → Q%d\n", p->pid, pr, pr - 1);
+
                 p->priority--;
               }
               memset(p->ticks, 0, sizeof(p->ticks));
@@ -426,7 +433,7 @@ scheduler(void)
             }
           }
 
-          scheduled = 1;
+          done = 1;
           break;
         }
       }

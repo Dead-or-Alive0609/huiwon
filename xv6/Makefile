@@ -190,6 +190,7 @@ UPROGS=\
 	_wc\
 	_zombie\
 	_userpolicytest\
+	_test0\
 	_test1\
 	_test2\
 
