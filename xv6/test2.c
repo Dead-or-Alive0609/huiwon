@@ -1,7 +1,8 @@
+//출력되긴하는데 엄청 오래걸림
+//그리고 이상해.
 #include "types.h"
 #include "user.h"
 #include "pstat.h"
-
 
 #define NUM_PROCS 4
 
@@ -28,40 +29,32 @@ int main(void) {
     int pid = fork();
     if (pid == 0) {
       // 자식 프로세스
-      int iter = 0;
       while (1) {
-        iter++;
         // 점점 더 무거운 workload
         if (i == 0)
-          workload(1000000);  // 1번: Q3 유지
+          workload(1000000);   // Q3 예상
         else if (i == 1)
-          workload(4000000);  // 2번: Q2 예상
+          workload(4000000);   // Q2 예상
         else if (i == 2)
-          workload(10000000); // 3번: Q1 예상
+          workload(10000000);  // Q1 예상
         else
-          workload(50000000); // 4번: no yield, Q0
+          workload(15000000);  // Q0 예상 (하지만 yield 없음은 위험)
 
-        // i < 3 까지만 yield 호출 → Q0까지는 안감
-        if (i < 3)
-          sleep(3);
+        sleep(3);  // 모든 프로세스가 최소한 CPU 양보하도록
       }
     } else {
-      // 부모는 pid 저장
       pids[i] = pid;
       printf(1, "[parent] 자식 프로세스 pid[%d] = %d\n", i, pid);
-
     }
   }
 
-  // 충분히 실행할 시간 대기
-  sleep(3000);
+  sleep(3000);  // 충분히 돌아갈 시간 확보
 
   if (getpinfo(&st) < 0) {
     printf(1, "getpinfo failed\n");
     exit();
   }
 
-  // 결과 출력
   printf(1, "\n[결과] 각 프로세스의 우선순위 및 큐별 tick 정보:\n\n");
 
   for (i = 0; i < NPROC; i++) {
@@ -78,7 +71,6 @@ int main(void) {
     }
   }
 
-  // 자식 프로세스 정리
   for (i = 0; i < NUM_PROCS; i++)
     kill(pids[i]);
   for (i = 0; i < NUM_PROCS; i++)
